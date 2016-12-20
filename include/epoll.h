@@ -1,11 +1,10 @@
-
 #ifndef EPOLL_H_
 #define EPOLL_H_
 
 #include <WinSock2.h>
 #include <Windows.h>
 
-#include <stdint.h>
+#include "stdint.h"
 
 
 #define EPOLLIN 0x001
@@ -30,7 +29,8 @@
 
 typedef void* epoll_t;
 
-typedef union epoll_data {
+typedef union epoll_data
+{
   void    *ptr;
   int      fd;
   uint32_t u32;
@@ -40,18 +40,16 @@ typedef union epoll_data {
   HANDLE hnd;
 } epoll_data_t;
 
-struct epoll_event {
+struct epoll_event
+{
   uint32_t     events;    /* Epoll events */
   epoll_data_t data;      /* User data variable */
 };
 
 
 epoll_t epoll_create();
-
 int epoll_close(epoll_t epoll_hnd);
-
 int epoll_ctl(epoll_t epoll_hnd, int op, SOCKET sock, struct epoll_event* event); 
-
 int epoll_wait(epoll_t epoll_hnd, struct epoll_event* events, int maxevents, int timeout);
 
 
