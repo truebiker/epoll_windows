@@ -57,7 +57,7 @@ struct epoll_port_data_s
 
 
 /* State associated with a socket that is registered to the epoll port. */
-typedef struct epoll_sock_data_s
+struct epoll_sock_data_s
 {
   SOCKET sock;
   SOCKET base_sock;
@@ -651,7 +651,7 @@ int epoll__submit_poll_op(epoll_port_data_t* port_data, epoll_sock_data_t* sock_
 {
   epoll_op_t *op;
   int registered_events;
-  DWORD result, afd_events;
+  DWORD afd_events;
 
   op = sock_data->free_op;
   registered_events = sock_data->registered_events;

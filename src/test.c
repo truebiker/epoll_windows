@@ -9,14 +9,13 @@
 
 static const char PING[] = "PING";
 static const int NUM_PINGERS = 1;
-static const int RUN_TIME = 10000;
+static const DWORD RUN_TIME = 10000;
 
 int x = 0;
 
 int main(int argc, char* argv[])
 {
   epoll_t epoll_hnd;
-  WSADATA wsa_data;
   int r;
   u_long one = 1;
   struct addrinfo hints;
@@ -114,7 +113,7 @@ int main(int argc, char* argv[])
         int err = -1;
         int err_len = sizeof err;
 
-        r = getsockopt(sock, SOL_SOCKET, SO_ERROR, &err, &err_len);
+        r = getsockopt(sock, SOL_SOCKET, SO_ERROR, (char *)&err, &err_len);
         assert(r == 0);
         fprintf(stderr, "Socket error: %d\n", err);
 
@@ -128,7 +127,6 @@ int main(int argc, char* argv[])
         char buf[1024];
         WSABUF wsa_buf;
         DWORD flags, bytes;
-        struct epoll_event ev;
         int r;
 
         wsa_buf.buf = buf;
@@ -148,9 +146,8 @@ int main(int argc, char* argv[])
         WSABUF wsa_buf;
         DWORD bytes;
         int r;
-        struct epoll_event ev;
 
-        wsa_buf.buf = PING;
+        wsa_buf.buf = (char *)PING;
         wsa_buf.len = sizeof PING;
         r = WSASend(sock, &wsa_buf, 1, &bytes, 0, NULL, NULL);
         assert(r >= 0);
