@@ -7,6 +7,9 @@
 
 #include "epoll.h"
 
+
+#define MAX_PINGS 100
+
 static const char PING[] = "PING";
 static const int NUM_PINGERS = 1;
 static const DWORD RUN_TIME = 10000;
@@ -26,6 +29,9 @@ int main(int argc, char* argv[])
   int i;
   SOCKET srv;
   struct epoll_event ev;
+  uint64_t stop_event = 0;
+  int should_stop = 0;
+
 
   epoll_hnd = epoll_create();
   assert(epoll_hnd && epoll_hnd != INVALID_HANDLE_VALUE);
@@ -82,21 +88,26 @@ int main(int argc, char* argv[])
 
   ticks_start = GetTickCount();
   ticks_last = ticks_start;
+  stop_event = 1;  /* NOTE: comment this to disable stop event */
 
-  for (;;)
+  for (;!should_stop;)
   {
     int i, count;
     struct epoll_event events[16];
     DWORD ticks;
 
     ticks = GetTickCount();
+
     if (ticks >= ticks_last + 1000)
     {
       printf("%lld pings (%f per sec), %lld sent\n", pings, (double) pings / (ticks - ticks_start) * 1000, pings_sent);
       ticks_last = ticks;
 
-     if (ticks - ticks_start > RUN_TIME)
-       break;
+      if (stop_event == 0 && ticks - ticks_start > RUN_TIME)
+      {
+        should_stop = 1;
+        continue;
+      }
     }
 
     count = epoll_wait(epoll_hnd, events, 15, 1000);
@@ -104,11 +115,25 @@ int main(int argc, char* argv[])
 
     for (i = 0; i < count; i++)
     {
-      SOCKET sock = events[i].data.sock;
       int revents = events[i].events;
+
+      if (revents & EPOLLEVENT)
+      {
+        uint64_t event = events[i].data.u64;
+
+        if (event == stop_event)
+        {
+          printf("STOP event occured\n");
+          should_stop = 1;
+          continue;
+        }
+
+        assert(0);
+      }
 
       if (revents & EPOLLERR)
       {
+        SOCKET sock = events[i].data.sock;
         int r;
         int err = -1;
         int err_len = sizeof err;
@@ -124,6 +149,7 @@ int main(int argc, char* argv[])
 
       if (revents & EPOLLIN)
       {
+        SOCKET sock = events[i].data.sock;
         char buf[1024];
         WSABUF wsa_buf;
         DWORD flags, bytes;
@@ -138,11 +164,16 @@ int main(int argc, char* argv[])
         assert(bytes == sizeof PING);
 
         pings++;
+
+        if (stop_event && pings > MAX_PINGS)
+          epoll_event_signal(epoll_hnd, stop_event);
+
         continue;
       }
 
       if (revents & EPOLLOUT)
       {
+        SOCKET sock = events[i].data.sock;
         WSABUF wsa_buf;
         DWORD bytes;
         int r;

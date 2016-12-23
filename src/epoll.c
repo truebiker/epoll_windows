@@ -127,7 +127,6 @@ epoll_t epoll_create()
   return (epoll_t) port_data;
 }
 
-
 int epoll_ctl(epoll_t port_handle, int op, SOCKET sock, struct epoll_event* ev)
 {
   epoll_port_data_t *port_data;
@@ -295,6 +294,16 @@ int epoll_ctl(epoll_t port_handle, int op, SOCKET sock, struct epoll_event* ev)
   }
 }
 
+void epoll_event_signal(epoll_t port_handle, uint64_t event)
+{
+  epoll_port_data_t *port_data;
+  ULONG_PTR ev;
+
+  port_data = (epoll_port_data_t *)port_handle;
+  ev = (ULONG_PTR)event;
+  PostQueuedCompletionStatus(port_data->iocp, 1, ev, NULL);
+  port_data->pending_ops_count++;
+}
 
 int epoll_wait(epoll_t port_handle, struct epoll_event* events, int maxevents, int timeout)
 {
@@ -395,98 +404,115 @@ int epoll_wait(epoll_t port_handle, struct epoll_event* events, int maxevents, i
       DWORD afd_events;
       int registered_events, reported_events;
 
-      overlapped = entries[i].lpOverlapped;
-      op = CONTAINING_RECORD(overlapped, epoll_op_t, overlapped);
-      sock_data = op->sock_data;
-
-      if (op->generation < sock_data->op_generation)
+      if (entries[i].lpCompletionKey)
       {
-        /* This op has been superseded. Free and ignore it. */
-        free(op);
-        continue;
-      }
-
-      /* Dequeued the most recent op. Reset generation and submitted_events. */
-      sock_data->op_generation = 0;
-      sock_data->submitted_events = 0;
-      sock_data->free_op = op;
-
-      registered_events = sock_data->registered_events;
-      reported_events = 0;
-
-      /* Check if this op was associated with a socket that was removed */
-      /* with EPOLL_CTL_DEL. */
-      if (sock_data->flags & EPOLL__SOCK_DELETED)
-      {
-        free(op);
-        free(sock_data);
-        continue;
-      }
-
-      /* Check for error. */
-      if (!NT_SUCCESS(overlapped->Internal))
-      {
+        /* user event occured */
         struct epoll_event *ev = events + (num_events++);
-        ev->data.u64 = sock_data->user_data;
-        ev->events = EPOLLERR;
+        ev->data.u64 = (uint64_t)entries[i].lpCompletionKey;
+        ev->events = EPOLLEVENT;
         continue;
       }
 
-      if (op->poll_info.NumberOfHandles == 0)
+      /* IO event occured */
+      if (entries[i].lpOverlapped)
       {
-        /* NumberOfHandles can be zero if this poll operation was canceled */
-        /* due to a more recent exclusive poll operation. */
-        afd_events = 0;
-      }
-      else
-      {
-        afd_events = op->poll_info.Handles[0].Events;
-      }
+        overlapped = entries[i].lpOverlapped;
+        op = CONTAINING_RECORD(overlapped, epoll_op_t, overlapped);
+        sock_data = op->sock_data;
 
-      /* Check for a closed socket. */
-      if (afd_events & AFD_POLL_LOCAL_CLOSE)
-      {
-        RB_REMOVE(epoll_sock_data_tree, &port_data->sock_data_tree, sock_data);
-        free(op);
-        free(sock_data);
+        if (op->generation < sock_data->op_generation)
+        {
+          /* This op has been superseded. Free and ignore it. */
+          free(op);
+          continue;
+        }
+
+        /* Dequeued the most recent op. Reset generation and submitted_events. */
+        sock_data->op_generation = 0;
+        sock_data->submitted_events = 0;
+        sock_data->free_op = op;
+
+        registered_events = sock_data->registered_events;
+        reported_events = 0;
+
+        /* Check if this op was associated with a socket that was removed */
+        /* with EPOLL_CTL_DEL. */
+        if (sock_data->flags & EPOLL__SOCK_DELETED)
+        {
+          free(op);
+          free(sock_data);
+          continue;
+        }
+
+        /* Check for error. */
+        if (!NT_SUCCESS(overlapped->Internal))
+        {
+          struct epoll_event *ev = events + (num_events++);
+          ev->data.u64 = sock_data->user_data;
+          ev->events = EPOLLERR;
+          continue;
+        }
+
+        if (op->poll_info.NumberOfHandles == 0)
+        {
+          /* NumberOfHandles can be zero if this poll operation was canceled */
+          /* due to a more recent exclusive poll operation. */
+          afd_events = 0;
+        }
+        else
+        {
+          afd_events = op->poll_info.Handles[0].Events;
+        }
+
+        /* Check for a closed socket. */
+        if (afd_events & AFD_POLL_LOCAL_CLOSE)
+        {
+          RB_REMOVE(epoll_sock_data_tree, &port_data->sock_data_tree, sock_data);
+          free(op);
+          free(sock_data);
+          continue;
+        }
+
+        /* Convert afd events to epoll events. */
+        if (afd_events & (AFD_POLL_RECEIVE | AFD_POLL_ACCEPT))
+          reported_events |= (EPOLLIN | EPOLLRDNORM);
+
+        if (afd_events & AFD_POLL_RECEIVE_EXPEDITED)
+          reported_events |= (EPOLLIN | EPOLLRDBAND);
+
+        if (afd_events & AFD_POLL_SEND)
+          reported_events |= (EPOLLOUT | EPOLLWRNORM | EPOLLWRBAND);
+
+        if ((afd_events & AFD_POLL_DISCONNECT) && !(afd_events & AFD_POLL_ABORT))
+          reported_events |= (EPOLLRDHUP | EPOLLIN | EPOLLRDNORM | EPOLLRDBAND);
+
+        if (afd_events & AFD_POLL_ABORT)
+          reported_events |= EPOLLHUP | EPOLLERR;
+
+        if (afd_events & AFD_POLL_CONNECT)
+          reported_events |= (EPOLLOUT | EPOLLWRNORM | EPOLLWRBAND);
+
+        if (afd_events & AFD_POLL_CONNECT_FAIL)
+          reported_events |= EPOLLERR;
+
+        /* Don't report events that the user didn't specify. */
+        reported_events &= registered_events;
+
+        /* Unless EPOLLONESHOT is used add the socket back to the attention list. */
+        if (!(registered_events & EPOLLONESHOT) && !(sock_data->flags & EPOLL__SOCK_LISTED))
+          ATTN_LIST_ADD(port_data, sock_data);
+
+        if (reported_events)
+        {
+          struct epoll_event *ev = events + (num_events++);
+          ev->data.u64 = sock_data->user_data;
+          ev->events = reported_events;
+        }
+
         continue;
       }
 
-      /* Convert afd events to epoll events. */
-      if (afd_events & (AFD_POLL_RECEIVE | AFD_POLL_ACCEPT))
-        reported_events |= (EPOLLIN | EPOLLRDNORM);
-
-      if (afd_events & AFD_POLL_RECEIVE_EXPEDITED)
-        reported_events |= (EPOLLIN | EPOLLRDBAND);
-
-      if (afd_events & AFD_POLL_SEND)
-        reported_events |= (EPOLLOUT | EPOLLWRNORM | EPOLLWRBAND);
-
-      if ((afd_events & AFD_POLL_DISCONNECT) && !(afd_events & AFD_POLL_ABORT))
-        reported_events |= (EPOLLRDHUP | EPOLLIN | EPOLLRDNORM | EPOLLRDBAND);
-
-      if (afd_events & AFD_POLL_ABORT)
-        reported_events |= EPOLLHUP | EPOLLERR;
-
-      if (afd_events & AFD_POLL_CONNECT)
-        reported_events |= (EPOLLOUT | EPOLLWRNORM | EPOLLWRBAND);
-
-      if (afd_events & AFD_POLL_CONNECT_FAIL)
-        reported_events |= EPOLLERR;
-
-      /* Don't report events that the user didn't specify. */
-      reported_events &= registered_events;
-
-      /* Unless EPOLLONESHOT is used add the socket back to the attention list. */
-      if (!(registered_events & EPOLLONESHOT) && !(sock_data->flags & EPOLL__SOCK_LISTED))
-        ATTN_LIST_ADD(port_data, sock_data);
-
-      if (reported_events)
-      {
-        struct epoll_event *ev = events + (num_events++);
-        ev->data.u64 = sock_data->user_data;
-        ev->events = reported_events;
-      }
+      assert(0);
     }
 
     if (num_events > 0)
@@ -546,8 +572,20 @@ int epoll_close(epoll_t port_handle)
 
     for (i = 0; i < count; i++)
     {
-      epoll_op_t *op = CONTAINING_RECORD(entries[i].lpOverlapped, epoll_op_t, overlapped);
-      free(op);
+      if (entries[i].lpCompletionKey)
+      {
+        /* user event */
+        continue;
+      }
+
+      if (entries[i].lpOverlapped)
+      {
+        /* IO event */
+        epoll_op_t *op = CONTAINING_RECORD(entries[i].lpOverlapped, epoll_op_t, overlapped);
+        free(op);
+      }
+
+      assert(0);
     }
   }
 
